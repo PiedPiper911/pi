@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants, createReadStream } from "node:fs";
 import {
@@ -220,10 +220,14 @@ function getShellEnv(baseEnv?: NodeJS.ProcessEnv, extraEnv?: Record<string, stri
 
 function killProcessTree(pid: number): void {
 	if (process.platform === "win32") {
+		// Use absolute path to taskkill.exe to bypass PATH lookup, which can
+		// fail with ENOENT on Node.js 24+. spawnSync keeps the call synchronous
+		// and surfaces errors in the return object instead of emitting an async
+		// 'error' event that bypasses try/catch and crashes the process.
+		const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
 		try {
-			spawn("taskkill", ["/F", "/T", "/PID", String(pid)], {
+			spawnSync(taskkill, ["/F", "/T", "/PID", String(pid)], {
 				stdio: "ignore",
-				detached: true,
 				windowsHide: true,
 			});
 		} catch {
