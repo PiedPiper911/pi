@@ -8,8 +8,9 @@
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { contentText } from "@earendil-works/pi-ai";
 import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@earendil-works/pi-ai/compat";
-import { completeSimple } from "@earendil-works/pi-ai/compat";
+import { completeSimple, isRetryableAssistantError } from "@earendil-works/pi-ai/compat";
 import { convertToLlm } from "../messages.ts";
+import { sleep } from "../../utils/sleep.ts";
 import {
 	buildSessionContext,
 	type CompactionEntry,
@@ -527,17 +528,60 @@ function createSummarizationOptions(
 	return options;
 }
 
+// ============================================================================
+// Summarization retry configuration
+// ============================================================================
+
+/** Maximum number of retry attempts for transient summarization failures. */
+const SUMMARIZATION_MAX_RETRIES = 3;
+
+/** Base delay in ms for exponential backoff between summarization retries. */
+const SUMMARIZATION_RETRY_BASE_DELAY_MS = 1000;
+
+/**
+ * Complete a summarization call with bounded retry for transient errors.
+ *
+ * Normal assistant turns retry transient stream failures (socket drops,
+ * timeouts, provider overloads) via `isRetryableAssistantError` in the
+ * agent session loop. The compaction path previously made a single
+ * non-retried call, so one transient mid-stream failure would fail the
+ * entire compaction. This wrapper applies the same retryable-error
+ * classification with exponential backoff so that transient failures
+ * are recovered automatically while deterministic errors still fail fast.
+ */
 async function completeSummarization(
 	model: Model<any>,
 	context: Context,
 	options: SimpleStreamOptions,
 	streamFn?: StreamFn,
 ): Promise<AssistantMessage> {
-	if (!streamFn) {
-		return completeSimple(model, context, options);
+	let lastResponse: AssistantMessage | undefined;
+
+	for (let attempt = 0; attempt <= SUMMARIZATION_MAX_RETRIES; attempt++) {
+		// Wait with exponential backoff before retrying (skip delay on first attempt)
+		if (attempt > 0) {
+			const delayMs = SUMMARIZATION_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
+			await sleep(delayMs, options.signal);
+		}
+
+		const response = streamFn
+			? await (await streamFn(model, context, options)).result()
+			: await completeSimple(model, context, options);
+
+		// If the response is not a retryable error, return immediately.
+		// This covers both successful responses and deterministic errors
+		// (e.g. content policy violations) that should fail fast.
+		if (response.stopReason !== "error" || !isRetryableAssistantError(response)) {
+			return response;
+		}
+
+		// Transient error — retry if attempts remain
+		lastResponse = response;
 	}
-	const stream = await streamFn(model, context, options);
-	return stream.result();
+
+	// All retry attempts exhausted; return the last failed response so the
+	// caller can inspect stopReason/errorMessage and throw appropriately.
+	return lastResponse!;
 }
 
 /**
