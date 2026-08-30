@@ -347,7 +347,16 @@ export async function generateBranchSummary(
 	// without running through agent state/events. Retried via completeSummarization
 	// so transient stream drops reuse the configured retry policy.
 	const context = { systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages };
-	const requestOptions: SimpleStreamOptions = { apiKey, headers, env, signal, maxTokens: 2048 };
+	// Derive the output budget instead of pinning it at 2048: the input budget is
+	// `contextWindow - reserveTokens`, so a large window feeds hundreds of thousands of
+	// tokens into a 2048-token response. Reasoning tokens share that budget, so reasoning
+	// models hit the cap and the summary comes back incomplete (#8845). Matches the
+	// compaction summary budget in `generateSummaryWithUsage`.
+	const maxTokens = Math.min(
+		Math.floor(0.8 * reserveTokens),
+		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
+	);
+	const requestOptions: SimpleStreamOptions = { apiKey, headers, env, signal, maxTokens };
 	const response = await completeSummarization(model, context, requestOptions, streamFn, retry, callbacks);
 
 	// Check if aborted or errored

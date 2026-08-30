@@ -246,11 +246,19 @@ export async function generateBranchSummary(
 			timestamp: Date.now(),
 		},
 	];
+	// Derive the output budget instead of pinning it at 2048: the input budget is
+	// `contextWindow - reserveTokens`, so a large window feeds hundreds of thousands of
+	// tokens into a 2048-token response. Reasoning tokens share that budget, so reasoning
+	// models hit the cap and the summary comes back incomplete (#8845).
+	const maxTokens = Math.min(
+		Math.floor(0.8 * reserveTokens),
+		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
+	);
 	const response = await completeSimpleWithRetries(
 		models,
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		{ signal, maxTokens: 2048 },
+		{ signal, maxTokens },
 		retry,
 		callbacks,
 	);
